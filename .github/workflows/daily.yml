@@ -15,6 +15,10 @@ on:
         description: '使用无头模式（true 容易被 Cloudflare 拦，排查时才用）'
         required: false
         default: 'false'
+      debug:
+        description: '保存每一步的截图和页面源码到 artifact'
+        required: false
+        default: 'false'
 
 # 同一时间只允许一个实例在跑，避免手动触发和定时任务撞车导致重复评论。
 concurrency:
@@ -76,6 +80,7 @@ jobs:
           # 关键：跑在 Xvfb 上的「有头」Chrome。无头 Chrome 的指纹会被
           # NodeSeek 前面的 Cloudflare 挡下，这是原配置最大的不稳定来源。
           HEADLESS: ${{ github.event.inputs.headless || 'false' }}
+          NS_DEBUG: ${{ github.event.inputs.debug || 'false' }}
         run: |
           set -uo pipefail
           if [ -z "${NS_COOKIE}" ]; then
@@ -105,8 +110,8 @@ jobs:
           echo "::error::三次尝试均失败，请检查 NS_COOKIE 是否过期"
           exit 1
 
-      - name: 失败时上传现场
-        if: failure()
+      - name: 上传现场（失败或开了 debug 时）
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-${{ github.run_id }}

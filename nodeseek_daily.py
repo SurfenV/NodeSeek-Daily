@@ -42,70 +42,65 @@ headless = env_bool("HEADLESS", "true")
 # 设为 0 可完全关闭评论，只保留签到与加鸡腿。
 comment_count = env_int("NS_COMMENT_COUNT", 3)
 
+# 打开后每一步都会保存截图和页面源码，用于排查选择器失效
+debug_mode = env_bool("NS_DEBUG")
+
 randomInputStr = ["帮顶", "帮顶一个", "顶一下", "支持一下", "支持", "蹲一个", "祝出货顺利"]
 
 def click_sign_icon(driver):
     """
-    尝试点击签到图标和试试手气按钮的通用方法
+    执行签到。返回 True 表示今日签到已落实（含「今天已经签过」的情况）。
+
+    不再依赖点击导航栏那个签到图标：该图标位于 sticky 头部内，
+    scrollIntoView 后经常被 #nsk-head 自身遮挡而触发
+    element click intercepted，直接访问签到页更稳。
     """
     try:
-        print("开始查找签到图标...")
-        # 使用更精确的选择器定位签到图标
-        sign_icon = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.XPATH, "//span[@title='签到']"))
-        )
-        print("找到签到图标，准备点击...")
-        
-        # 确保元素可见和可点击
-        driver.execute_script("arguments[0].scrollIntoView(true);", sign_icon)
-        time.sleep(0.5)
-        
-        # 打印元素信息
-        print(f"签到图标元素: {sign_icon.get_attribute('outerHTML')}")
-        
-        # 尝试点击
-        try:
-            
-            
-            sign_icon.click()
-            print("签到图标点击成功")
-        except Exception as click_error:
-            print(f"点击失败，尝试使用 JavaScript 点击: {str(click_error)}")
-            driver.execute_script("arguments[0].click();", sign_icon)
-        
-        print("等待页面跳转...")
-        time.sleep(5)
-        
-        # 打印当前URL
+        print("正在打开签到页...")
+        driver.get("https://www.nodeseek.com/signIn.html")
+        time.sleep(3)
         print(f"当前页面URL: {driver.current_url}")
-        
-        # 点击"试试手气"按钮
+
+        # NS_RANDOM=true 点「试试手气」，否则点固定的「鸡腿 x 5」
+        target = "试试手气" if ns_random else "鸡腿 x 5"
+        print(f"寻找签到按钮: {target}")
+
         try:
-            click_button:None
-            
-            if ns_random:
-                click_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), '试试手气')]"))
+            btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH, f"//button[contains(text(), '{target}')]"))
             )
-            else:
-                click_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), '鸡腿 x 5')]"))
-            )
-            
-            click_button.click()
-            print("完成试试手气点击")
-        except Exception as lucky_error:
-            print(f"试试手气按钮点击失败或者签到过了: {str(lucky_error)}")
-            
-        return True
-        
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+            time.sleep(0.5)
+            try:
+                btn.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", btn)
+            print(f"已点击「{target}」")
+            time.sleep(3)
+            print("签到完成")
+            return True
+
+        except Exception:
+            # 按钮不存在，通常意味着今天已经签过了。用页面文案确认，
+            # 避免把「cookie 失效导致页面没渲染」也当成签到成功。
+            page = driver.page_source
+            if any(k in page for k in ("已签到", "已经签到", "明天再来", "签到成功")):
+                print("今日已签到，跳过")
+                return True
+            if any(k in page for k in ("登录", "login")) and "个人中心" not in page:
+                print("!! 页面未处于登录态，Cookie 可能已失效")
+                return False
+            print("!! 未找到签到按钮，且无法确认签到状态")
+            return False
+
     except Exception as e:
         print(f"签到过程中出错:")
         print(f"错误类型: {type(e).__name__}")
         print(f"错误信息: {str(e)}")
-        print(f"当前页面URL: {driver.current_url}")
-        print(f"当前页面源码片段: {driver.page_source[:500]}...")
-        print("详细错误信息:")
+        try:
+            print(f"当前页面URL: {driver.current_url}")
+        except Exception:
+            pass
         traceback.print_exc()
         return False
 
@@ -253,9 +248,15 @@ def nodeseek_comment(driver):
                  EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'submit') and contains(@class, 'btn') and contains(text(), '发布评论')]"))
                 )
                 # 确保按钮可见并可点击
-                driver.execute_script("arguments[0].scrollIntoView(true);", submit_button)
+                # 必须用 block:'center'。scrollIntoView(true) 会把元素对齐到
+                # 视口顶端，而 NodeSeek 的 #nsk-head 是 sticky 头部，会把按钮盖住，
+                # 导致 element click intercepted。
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
                 time.sleep(0.5)
-                submit_button.click()
+                try:
+                    submit_button.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", submit_button)
                 
                 done += 1
                 print(f"已在帖子 {post_url} 中完成评论")
@@ -343,7 +344,7 @@ if __name__ == "__main__":
     try:
         # 先签到再评论：签到是主要收益，即使后续评论环节出问题也不影响它。
         signed = click_sign_icon(driver)
-        if not signed:
+        if not signed or debug_mode:
             save_debug_artifacts(driver, "sign")
 
         if comment_count > 0:
