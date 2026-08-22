@@ -28,6 +28,9 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write   # Cookie 临期时开 Issue 提醒
     # 正常一轮 3~5 分钟。卡死时及时掐掉，避免空耗 Actions 额度。
     timeout-minutes: 25
 
@@ -74,6 +77,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: 执行签到（失败自动重试）
+        id: run
         env:
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
           # 用 variable 而非 secret：它不是敏感信息，设成 secret 会让 GitHub
@@ -112,6 +116,72 @@ jobs:
 
           echo "::error::三次尝试均失败，请检查 NS_COOKIE 是否过期"
           exit 1
+
+      # GitHub 只在 job 失败时发邮件，Actions 摘要里的 warning 不会触达用户。
+      # Cookie 一旦过期签到就持续失败，所以临期时开 Issue（owner 默认订阅
+      # 自己仓库的 Issue，会收到邮件），更新后再自动关掉，形成闭环。
+      - name: Cookie 临期提醒
+        if: always() && steps.run.outputs.cookie_days != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DAYS: ${{ steps.run.outputs.cookie_days }}
+          EXPIRY: ${{ steps.run.outputs.cookie_expiry }}
+          EXPIRING: ${{ steps.run.outputs.cookie_expiring }}
+        run: |
+          set -euo pipefail
+          TITLE="NS_COOKIE 即将过期，请更新"
+          EXISTING="$(gh issue list -R "$REPO" --state open \
+            --search "in:title $TITLE" --json number -q '.[0].number // empty')"
+
+          if [ "$EXPIRING" != "true" ]; then
+            if [ -n "$EXISTING" ]; then
+              gh issue close "$EXISTING" -R "$REPO" \
+                -c "Cookie 已更新，新的到期日为 ${EXPIRY}（还有 ${DAYS} 天）。"
+              echo "Cookie 已更新，关闭提醒 Issue #${EXISTING}"
+            else
+              echo "Cookie 剩余 ${DAYS} 天，无需提醒"
+            fi
+            exit 0
+          fi
+
+          if [ -n "$EXISTING" ]; then
+            echo "已有提醒 Issue #${EXISTING}，不重复创建"
+            exit 0
+          fi
+
+          # 用带引号的 heredoc 写模板，内容完全字面化（正文里的反引号不会
+          # 被当成命令替换），动态值随后用 sed 填进占位符。
+          cat > issue-body.md <<'MDEOF'
+          NodeSeek 的登录态将于 **__EXPIRY__ UTC** 过期（约 __DAYS__ 天后）。
+
+          有效期是服务端固定的 30 天，且不做滑动续期，到期只能重新登录换一份。
+          过期后签到会持续失败。
+
+          ## 更新步骤
+
+          1. 用**隐私窗口**登录 NodeSeek（避免影响日常浏览器的登录态）
+          2. 用 Cookie-Editor / EditThisCookie 导出 JSON
+             （注意别过滤掉 httpOnly，`session` 就是 httpOnly 的）
+          3. 本地执行：
+
+             ```bash
+             cd ~/NodeSeek-Daily
+             python3 scripts/update_cookie.py cookies.json
+             ```
+
+          4. 验证：
+
+             ```bash
+             gh workflow run daily.yml -R __REPO__ -f comment_count=0
+             ```
+
+          更新成功后，下一次运行会自动关闭本 Issue。
+          MDEOF
+
+          sed -i "s|__EXPIRY__|${EXPIRY}|g; s|__DAYS__|${DAYS}|g; s|__REPO__|${REPO}|g" issue-body.md
+          gh issue create -R "$REPO" -t "$TITLE" -F issue-body.md
+          echo "已创建提醒 Issue"
 
       - name: 上传现场（失败或开了 debug 时）
         if: always()

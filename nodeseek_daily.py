@@ -388,6 +388,18 @@ def report_cookie_status(driver):
               f"请重新登录 NodeSeek，导出 Cookie 后更新仓库 Secret NS_COOKIE，"
               f"否则签到将开始失败")
 
+    # 交给 workflow：GitHub 只在 job 失败时发邮件，摘要里的 warning 不会
+    # 触达用户，所以临期时另开 Issue 通知。
+    out = os.environ.get("GITHUB_OUTPUT")
+    if out:
+        try:
+            with open(out, "a", encoding="utf-8") as f:
+                f.write(f"cookie_days={days:.1f}\n")
+                f.write(f"cookie_expiry={stamp}\n")
+                f.write(f"cookie_expiring={'true' if days < 7 else 'false'}\n")
+        except Exception as e:
+            print(f"写入 GITHUB_OUTPUT 失败: {str(e)}")
+
 
 def save_debug_artifacts(driver, tag):
     """出错时留下现场，方便在 Actions 里下载排查。"""
