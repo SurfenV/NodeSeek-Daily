@@ -107,6 +107,11 @@ jobs:
               exit 0
             fi
 
+            if [ $code -eq 2 ]; then
+              echo "::error::Cookie 已失效，重试无意义。请重新登录 NodeSeek 并更新 Secret NS_COOKIE"
+              exit 2
+            fi
+
             echo "⚠️ 第 ${attempt} 次尝试失败（退出码 ${code}）"
             if [ $attempt -lt 3 ]; then
               # 退避等待，多数失败是 Cloudflare 的临时质询

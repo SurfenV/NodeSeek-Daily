@@ -110,8 +110,15 @@ def click_sign_icon(driver):
         return True
 
     print(f"❌ 签到失败（HTTP {resp.get('status')}）: {message or body[:300]}")
-    if "未登录" in message or "登录" in message:
-        print("!! Cookie 可能已失效，请更新 NS_COOKIE")
+
+    # 凭证失效是不会自愈的，重试只是白白多跑几分钟。用单独的返回值让
+    # 上层直接跳过重试。退出登录、改密码、或超过 30 天都会走到这里。
+    upper = (message or body).upper()
+    if any(k in upper for k in ("USER NOT FOUND", "NOT LOGIN", "UNAUTHORIZED")) \
+            or any(k in message for k in ("未登录", "请先登录", "登录已失效")):
+        print("!! Cookie 已失效（可能是退出登录、改过密码，或已超过 30 天有效期）")
+        print("!! 请重新登录 NodeSeek 并更新 Secret NS_COOKIE，重试无意义")
+        return CREDENTIAL_INVALID
     return False
 
 
@@ -337,6 +344,9 @@ def click_chicken_leg(driver):
 # 浏览器都拿不到新的 Set-Cookie，所以到期只能重新登录换 Cookie。
 SESSION_TTL_DAYS = 30
 
+# 签到返回值：区分「这次没成功，可以重试」和「凭证废了，重试也没用」
+CREDENTIAL_INVALID = "credential_invalid"
+
 
 def report_cookie_status(driver):
     """算出登录态还能撑多久，临近过期时在 Actions 摘要里告警。
@@ -423,7 +433,7 @@ if __name__ == "__main__":
     try:
         # 先签到再评论：签到是主要收益，即使后续评论环节出问题也不影响它。
         signed = click_sign_icon(driver)
-        if not signed or debug_mode:
+        if signed is not True or debug_mode:
             save_debug_artifacts(driver, "sign")
 
         if comment_count > 0:
@@ -439,6 +449,9 @@ if __name__ == "__main__":
             pass
 
     print("脚本执行完成")
+    if signed is CREDENTIAL_INVALID:
+        # 退出码 2：凭证失效，CI 会跳过剩余重试
+        exit(2)
     # 签到失败时以非 0 退出，让 CI 的重试机制生效。
     exit(0 if signed else 1)
 
