@@ -1,0 +1,73 @@
+name: 签到入口探测（临时）
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 准备环境
+        run: |
+          set -euo pipefail
+          MAIN_VER="$(google-chrome --version | grep -oE '[0-9]+' | head -1)"
+          echo "CHROME_MAIN_VERSION=${MAIN_VER}" >> "$GITHUB_ENV"
+          sudo apt-get update
+          # 中文字体，否则截图里全是方块，没法看
+          sudo apt-get install -y xvfb fonts-noto-cjk
+          python -m pip install --upgrade pip setuptools
+          pip install -r requirements.txt
+      - name: 探测签到入口
+        env:
+          NS_COOKIE: ${{ secrets.NS_COOKIE }}
+        run: |
+          cat > probe.py <<'PY'
+          import os, time, undetected_chromedriver as uc
+          from selenium.webdriver.common.by import By
+          uc.Chrome.__del__ = lambda self: None
+          o = uc.ChromeOptions()
+          for a in ('--no-sandbox','--disable-dev-shm-usage','--window-size=1920,1080'):
+              o.add_argument(a)
+          kw={"options":o}
+          mv=os.environ.get("CHROME_MAIN_VERSION","").strip()
+          if mv.isdigit(): kw["version_main"]=int(mv)
+          d=uc.Chrome(**kw)
+          d.get("https://www.nodeseek.com"); time.sleep(5)
+          for it in os.environ["NS_COOKIE"].split(';'):
+              try:
+                  n,v=it.strip().split('=',1)
+                  d.add_cookie({'name':n,'value':v,'domain':'.nodeseek.com','path':'/'})
+              except Exception: pass
+          d.refresh(); time.sleep(6)
+          print("== 首页 URL:", d.current_url)
+
+          icon = d.find_element(By.XPATH, "//span[@title='签到']")
+          print("== 找到签到图标，JS 点击（不做 scrollIntoView）")
+          d.execute_script("arguments[0].click();", icon)
+          time.sleep(8)
+
+          print("== 点击后 URL:", d.current_url)
+          d.save_screenshot("probe-after-click.png")
+          open("probe-after-click.html","w",encoding="utf-8").write(d.page_source)
+
+          print("== 页面上所有 button:")
+          for b in d.find_elements(By.TAG_NAME,"button"):
+              t=(b.text or "").strip()
+              if t: print(f"   [{t}] displayed={b.is_displayed()} class={b.get_attribute('class')}")
+          print("== 含「鸡腿」或「手气」的元素:")
+          for el in d.find_elements(By.XPATH,"//*[contains(text(),'鸡腿') or contains(text(),'手气') or contains(text(),'签到')]"):
+              t=(el.text or "").strip()[:60]
+              if t: print(f"   <{el.tag_name}> {t!r} displayed={el.is_displayed()}")
+          try: d.quit()
+          except Exception: pass
+          PY
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python probe.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-${{ github.run_id }}
+          path: probe-after-click.*
+          if-no-files-found: ignore
