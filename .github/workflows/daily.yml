@@ -60,10 +60,11 @@ jobs:
           echo "Chrome 主版本: ${MAIN_VER}"
           echo "CHROME_MAIN_VERSION=${MAIN_VER}" >> "$GITHUB_ENV"
 
-      - name: 安装 Xvfb
+      - name: 安装 Xvfb 与中文字体
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          # 没有 CJK 字体的话，排查用的截图里中文全是方块
+          sudo apt-get install -y xvfb fonts-noto-cjk
 
       - name: 安装 Python 依赖
         run: |

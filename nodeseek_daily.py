@@ -5,6 +5,7 @@ Licensed under the MIT License.
 See LICENSE file in the project root for full license information.
 """
 import os
+import json
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -47,62 +48,71 @@ debug_mode = env_bool("NS_DEBUG")
 
 randomInputStr = ["帮顶", "帮顶一个", "顶一下", "支持一下", "支持", "蹲一个", "祝出货顺利"]
 
+# 在已经通过 Cloudflare 的页面上下文里发起请求，自动携带 cookie 与
+# 正确的 TLS/JA3 指纹，比在外部用 requests 直连可靠得多。
+_FETCH_JS = """
+const cb = arguments[arguments.length - 1];
+fetch(arguments[0], {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include'
+}).then(r => r.text().then(t => cb(JSON.stringify({status: r.status, body: t}))))
+  .catch(e => cb(JSON.stringify({error: String(e)})));
+"""
+
+
 def click_sign_icon(driver):
     """
-    执行签到。返回 True 表示今日签到已落实（含「今天已经签过」的情况）。
+    执行每日签到。返回 True 表示今日签到已落实（含「今天已经签过」）。
 
-    不再依赖点击导航栏那个签到图标：该图标位于 sticky 头部内，
-    scrollIntoView 后经常被 #nsk-head 自身遮挡而触发
-    element click intercepted，直接访问签到页更稳。
+    直接调用站点自己的签到接口，不再去点导航栏那个图标：那个 span 位于
+    sticky 头部内，原生点击会被 #nsk-head 拦截，而 JS 点击虽然能生效却
+    没有任何可观测的反馈（页面不跳转也不弹窗），无法判断成败。
+    接口会明确返回 success 与 message，这是唯一可靠的判定依据。
     """
+    path = "/api/attendance?random=%s" % ("true" if ns_random else "false")
+    print(f"正在签到: POST {path}")
+
     try:
-        print("正在打开签到页...")
-        driver.get("https://www.nodeseek.com/signIn.html")
-        time.sleep(3)
-        print(f"当前页面URL: {driver.current_url}")
-
-        # NS_RANDOM=true 点「试试手气」，否则点固定的「鸡腿 x 5」
-        target = "试试手气" if ns_random else "鸡腿 x 5"
-        print(f"寻找签到按钮: {target}")
-
-        try:
-            btn = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.XPATH, f"//button[contains(text(), '{target}')]"))
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
-            time.sleep(0.5)
-            try:
-                btn.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", btn)
-            print(f"已点击「{target}」")
-            time.sleep(3)
-            print("签到完成")
-            return True
-
-        except Exception:
-            # 按钮不存在，通常意味着今天已经签过了。用页面文案确认，
-            # 避免把「cookie 失效导致页面没渲染」也当成签到成功。
-            page = driver.page_source
-            if any(k in page for k in ("已签到", "已经签到", "明天再来", "签到成功")):
-                print("今日已签到，跳过")
-                return True
-            if any(k in page for k in ("登录", "login")) and "个人中心" not in page:
-                print("!! 页面未处于登录态，Cookie 可能已失效")
-                return False
-            print("!! 未找到签到按钮，且无法确认签到状态")
-            return False
-
+        driver.set_script_timeout(45)
+        raw = driver.execute_async_script(_FETCH_JS, path)
+        resp = json.loads(raw)
     except Exception as e:
-        print(f"签到过程中出错:")
-        print(f"错误类型: {type(e).__name__}")
-        print(f"错误信息: {str(e)}")
-        try:
-            print(f"当前页面URL: {driver.current_url}")
-        except Exception:
-            pass
+        print(f"签到请求发送失败: {type(e).__name__}: {str(e)}")
         traceback.print_exc()
         return False
+
+    if "error" in resp:
+        print(f"签到请求出错: {resp['error']}")
+        return False
+
+    # 注意：重复签到时接口返回的是 HTTP 500，但 body 是有意义的 JSON，
+    # 所以只能按 body 判断，不能看状态码。
+    body = resp.get("body", "")
+    try:
+        data = json.loads(body)
+    except ValueError:
+        print(f"签到响应不是 JSON（HTTP {resp.get('status')}）: {body[:300]}")
+        return False
+
+    message = data.get("message", "")
+
+    if data.get("success"):
+        gain = data.get("gain")
+        current = data.get("current")
+        print(f"✅ 签到成功: {message}"
+              + (f"（+{gain}，当前 {current}）" if gain is not None else ""))
+        return True
+
+    if any(k in message for k in ("今天已完成签到", "已完成签到", "已签到", "请勿重复")):
+        print(f"✅ 今日已签到，无需重复: {message}")
+        return True
+
+    print(f"❌ 签到失败（HTTP {resp.get('status')}）: {message or body[:300]}")
+    if "未登录" in message or "登录" in message:
+        print("!! Cookie 可能已失效，请更新 NS_COOKIE")
+    return False
+
 
 def setup_driver_and_cookies():
     """
