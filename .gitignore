@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 /debug-*.png
 /debug-*.html
+
+# Cookie 导出文件，绝不能提交
+cookies.json
+cookie*.json
+cookie.txt
+*.cookies
