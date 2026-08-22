@@ -1,0 +1,27 @@
+name: 保活（防止定时任务被自动禁用）
+
+# GitHub 会在仓库连续 60 天没有任何提交活动后，自动停用 schedule 触发器
+# 并给仓库 owner 发一封「已禁用」邮件。这个 workflow 每月推一次空提交，
+# 把活动时间刷新，让每日签到不会某天悄无声息地停掉。
+on:
+  schedule:
+    - cron: '11 3 1 * *'   # 每月 1 号 UTC 03:11
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 推送保活提交
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive $(date -u +%Y-%m-%d)"
+          git push

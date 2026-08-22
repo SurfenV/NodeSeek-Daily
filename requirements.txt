@@ -1,6 +1,11 @@
-selenium>=4.18.1
-requests>=2.31.0
+# 上限是刻意加的：uc 3.5.5 已停更，selenium/bs4 出大版本时很容易把它打挂，
+# 而这个仓库平时没人看着，只有签到静默失败才会发现。
+selenium>=4.18.1,<5
+requests>=2.31.0,<3
 curl_cffi>=0.6.2
-beautifulsoup4>=4.12.3
-undetected-chromedriver>=3.5.5
-webdriver_manager>=4.0.1 
+beautifulsoup4>=4.12.3,<5
+# 固定版本：这是 undetected-chromedriver 的最后一个发布版
+undetected-chromedriver==3.5.5
+webdriver_manager>=4.0.1,<5
+# 为 uc 提供 distutils 兜底
+setuptools

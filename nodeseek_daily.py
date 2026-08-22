@@ -16,12 +16,33 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 
-ns_random = os.environ.get("NS_RANDOM","false")
+# undetected-chromedriver 3.5.5 在解释器退出时的 __del__ 里会尝试再次
+# 关闭已退出的进程，抛出无意义的异常并污染 CI 日志/退出码，这里屏蔽掉。
+uc.Chrome.__del__ = lambda self: None
+
+def env_bool(name, default="false"):
+    """把环境变量解析成布尔值。注意 os.environ.get(name,"false") 返回的是
+    非空字符串 "false"，直接 if 判断永远为真，原实现在此处有 bug。"""
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_int(name, default):
+    try:
+        return max(0, int(os.environ.get(name, "").strip() or default))
+    except ValueError:
+        return default
+
+
+ns_random = env_bool("NS_RANDOM")
 cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
 # 通过环境变量控制是否使用无头模式，默认为 True（无头模式）
-headless = os.environ.get("HEADLESS", "true").lower() == "true"
+headless = env_bool("HEADLESS", "true")
 
-randomInputStr = ["bd","绑定","帮顶"]
+# 每次运行评论多少个帖子。刷屏式评论极易被举报禁言，默认收敛到 3 个；
+# 设为 0 可完全关闭评论，只保留签到与加鸡腿。
+comment_count = env_int("NS_COMMENT_COUNT", 3)
+
+randomInputStr = ["帮顶", "帮顶一个", "顶一下", "支持一下", "支持", "蹲一个", "祝出货顺利"]
 
 def click_sign_icon(driver):
     """
@@ -105,6 +126,9 @@ def setup_driver_and_cookies():
         options = uc.ChromeOptions()
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        # 有头模式下（CI 里跑在 Xvfb 上）同样需要足够大的视口，
+        # 否则部分按钮会落在可视区域外导致点击失败。
+        options.add_argument('--window-size=1920,1080')
         
         if headless:
             print("启用无头模式...")
@@ -117,7 +141,14 @@ def setup_driver_and_cookies():
             options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         
         print("正在启动Chrome...")
-        driver = uc.Chrome(options=options)
+        uc_kwargs = {"options": options}
+        # CI 上把 runner 实际的 Chrome 主版本传进来，避免 uc 自动探测失败
+        # 后下载到不匹配的 chromedriver。
+        main_version = os.environ.get("CHROME_MAIN_VERSION", "").strip()
+        if main_version.isdigit():
+            uc_kwargs["version_main"] = int(main_version)
+            print(f"指定 Chrome 主版本: {main_version}")
+        driver = uc.Chrome(**uc_kwargs)
         
         if headless:
             # 执行 JavaScript 来修改 webdriver 标记
@@ -172,7 +203,7 @@ def nodeseek_comment(driver):
         
         # 过滤掉置顶帖
         valid_posts = [post for post in posts if not post.find_elements(By.CSS_SELECTOR, '.pined')]
-        selected_posts = random.sample(valid_posts, min(20, len(valid_posts)))
+        selected_posts = random.sample(valid_posts, min(comment_count, len(valid_posts)))
         
         # 存储已选择的帖子URL
         selected_urls = []
@@ -184,7 +215,8 @@ def nodeseek_comment(driver):
                 continue
         
         is_chicken_leg = False
-        
+        done = 0
+
         # 使用URL列表进行操作
         for i, post_url in enumerate(selected_urls):
             try:
@@ -225,6 +257,7 @@ def nodeseek_comment(driver):
                 time.sleep(0.5)
                 submit_button.click()
                 
+                done += 1
                 print(f"已在帖子 {post_url} 中完成评论")
                 
                 # 返回交易区
@@ -236,12 +269,14 @@ def nodeseek_comment(driver):
                 print(f"处理帖子时出错: {str(e)}")
                 continue
                 
-        print("NodeSeek评论任务完成")
-                
+        print(f"NodeSeek评论任务完成，成功 {done} 个")
+        return done
+
     except Exception as e:
         print(f"NodeSeek评论出错: {str(e)}")
         print("详细错误信息:")
         print(traceback.format_exc())
+        return 0
 
 def click_chicken_leg(driver):
     try:
@@ -286,15 +321,42 @@ def click_chicken_leg(driver):
         print(f"加鸡腿操作失败: {str(e)}")
         return False
 
+def save_debug_artifacts(driver, tag):
+    """出错时留下现场，方便在 Actions 里下载排查。"""
+    try:
+        driver.save_screenshot(f"debug-{tag}.png")
+        with open(f"debug-{tag}.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        print(f"已保存现场: debug-{tag}.png / debug-{tag}.html")
+    except Exception as e:
+        print(f"保存现场失败: {str(e)}")
+
+
 if __name__ == "__main__":
-    print("开始执行NodeSeek评论脚本...")
+    print("开始执行NodeSeek脚本...")
     driver = setup_driver_and_cookies()
     if not driver:
         print("浏览器初始化失败")
         exit(1)
-    nodeseek_comment(driver)
-    click_sign_icon(driver)
+
+    signed = False
+    try:
+        # 先签到再评论：签到是主要收益，即使后续评论环节出问题也不影响它。
+        signed = click_sign_icon(driver)
+        if not signed:
+            save_debug_artifacts(driver, "sign")
+
+        if comment_count > 0:
+            nodeseek_comment(driver)
+        else:
+            print("NS_COMMENT_COUNT=0，跳过评论环节")
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
     print("脚本执行完成")
-    # while True:
-    #     time.sleep(1)
+    # 签到失败时以非 0 退出，让 CI 的重试机制生效。
+    exit(0 if signed else 1)
 

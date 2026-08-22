@@ -16,9 +16,13 @@
 
 ## 环境变量配置
 
-- `NS_COOKIE`: NodeSeek 的 Cookie（必需）
-- `NS_RANDOM`: 是否随机选择奖励，true/false（可选）
-- `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）
+| 变量 | 必需 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `NS_COOKIE` | 是 | — | NodeSeek 的 Cookie |
+| `NS_RANDOM` | 否 | `false` | `true` 点「试试手气」，`false` 点「鸡腿 x 5」 |
+| `HEADLESS` | 否 | `true` | 是否无头模式。**CI 上应设为 `false` 并配合 Xvfb**，见下 |
+| `NS_COMMENT_COUNT` | 否 | `3` | 每次评论多少个帖子，`0` 表示只签到不评论 |
+| `CHROME_MAIN_VERSION` | 否 | 自动探测 | Chrome 主版本号，用于对齐 chromedriver |
 
 ## 本地运行
 
@@ -30,12 +34,35 @@
 ## GitHub Actions 自动运行
 
 1. Fork 本仓库
-2. 在仓库的 Settings -> Secrets 中添加 `NS_COOKIE`
-3. 可选：添加 `NS_RANDOM` 设置是否随机选择奖励
-4. Actions 会在每天 UTC 16:00（北京时间 00:00）自动运行
+2. 到 Settings → Secrets and variables → Actions 添加 Secret `NS_COOKIE`
+3. 可选：添加 Secret `NS_RANDOM`，或 Variable `NS_COMMENT_COUNT`
+4. 到 Actions 页面手动跑一次「NodeSeek 每日签到」确认配置正确
+5. 之后每天北京时间 00:37 自动运行
+
+### 为稳定运行做的调整
+
+这个仓库的 workflow 针对 CI 环境做过以下处理，改动前请先了解原因：
+
+- **用 Xvfb 跑有头 Chrome，而不是 `--headless`。** NodeSeek 前面有
+  Cloudflare，无头 Chrome 的指纹基本必被质询拦下。`HEADLESS` 在 CI 里
+  默认设为 `false`，由 `xvfb-run` 提供虚拟显示。
+- **不安装 `chromium-browser`。** 在 Ubuntu 22.04+ 上该 apt 包只是个
+  snap 转发包，而 runner 里没有 snapd，装完不可用。直接使用 runner 镜像
+  预装的 Google Chrome，并把主版本号传给 undetected-chromedriver。
+- **Python 固定在 3.11。** undetected-chromedriver 3.5.5 仍然
+  `import distutils`，在 3.12+ 会直接 ImportError。
+- **失败自动重试 3 次**，退避等待，失败时把截图和页面源码作为 artifact
+  上传，保留 7 天。
+- **定时任务错峰到 :37**，避开 GitHub 整点排队导致的延迟和丢弃。
+- **每月一次 keepalive 空提交**，避免仓库 60 天无活动后定时任务被
+  GitHub 自动禁用。
+- **评论默认收敛到 3 个帖子**（原为 20 个），词库也换得更自然。刷屏式
+  评论极易被举报禁言，而账号一旦被禁言，签到就彻底停摆。
 
 ## 注意事项
 
-- 请确保 Cookie 有效且具有足够的权限
-- 评论内容较为简单，建议根据需要修改 `randomInputStr` 列表
+- 请确保 Cookie 有效且具有足够的权限。Cookie 过期是签到失败最常见的原因，
+  workflow 连续三次失败后会在日志里明确提示。
+- 评论内容仍然是模板化的，**强烈建议按自己的习惯修改 `randomInputStr`**，
+  或直接设 `NS_COMMENT_COUNT=0` 只保留签到与加鸡腿。
 - 加鸡腿功能仅对 7 天内的帖子有效
