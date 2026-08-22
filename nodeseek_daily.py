@@ -332,6 +332,40 @@ def click_chicken_leg(driver):
         print(f"加鸡腿操作失败: {str(e)}")
         return False
 
+def report_cookie_status(driver):
+    """检查关键 Cookie 的剩余有效期，快过期时用 ::warning:: 在 Actions 摘要里告警。
+
+    NodeSeek 的登录态由 session/pjwt/smac 三个 Cookie 承载，有效期 30 天。
+    过期后签到会静默失败，所以提前预警比事后排查划算。
+    """
+    KEYS = ("session", "pjwt", "smac")
+    now = time.time()
+    found = {}
+    try:
+        for c in driver.get_cookies():
+            if c["name"] in KEYS and c.get("expiry"):
+                found[c["name"]] = c["expiry"]
+    except Exception as e:
+        print(f"读取 Cookie 状态失败: {str(e)}")
+        return
+
+    if not found:
+        print("未读取到关键 Cookie 的过期时间")
+        return
+
+    print("Cookie 剩余有效期:")
+    for name in KEYS:
+        if name in found:
+            print(f"   {name}: {(found[name] - now) / 86400:.1f} 天")
+
+    days = (min(found.values()) - now) / 86400
+    if days > 25:
+        print(f"服务端已滑动续期，Cookie 有效期刷新到 {days:.1f} 天")
+    elif days < 7:
+        print(f"::warning::NS_COOKIE 将在 {days:.1f} 天后过期，"
+              f"请重新登录 NodeSeek 并更新 Secret，否则签到会开始失败")
+
+
 def save_debug_artifacts(driver, tag):
     """出错时留下现场，方便在 Actions 里下载排查。"""
     try:
@@ -361,6 +395,8 @@ if __name__ == "__main__":
             nodeseek_comment(driver)
         else:
             print("NS_COMMENT_COUNT=0，跳过评论环节")
+
+        report_cookie_status(driver)
     finally:
         try:
             driver.quit()

@@ -76,7 +76,9 @@ jobs:
       - name: 执行签到（失败自动重试）
         env:
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
-          NS_RANDOM: ${{ secrets.NS_RANDOM }}
+          # 用 variable 而非 secret：它不是敏感信息，设成 secret 会让 GitHub
+          # 把日志里所有 "false" 字样都打码成 ***，反而没法读日志
+          NS_RANDOM: ${{ vars.NS_RANDOM || 'false' }}
           NS_COMMENT_COUNT: ${{ github.event.inputs.comment_count || vars.NS_COMMENT_COUNT || '3' }}
           # 关键：跑在 Xvfb 上的「有头」Chrome。无头 Chrome 的指纹会被
           # NodeSeek 前面的 Cloudflare 挡下，这是原配置最大的不稳定来源。
