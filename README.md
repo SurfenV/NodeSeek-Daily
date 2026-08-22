@@ -58,6 +58,56 @@
   GitHub 自动禁用。
 - **评论默认收敛到 3 个帖子**（原为 20 个），词库也换得更自然。刷屏式
   评论极易被举报禁言，而账号一旦被禁言，签到就彻底停摆。
+- **签到改为直接调用站点接口** `POST /api/attendance`，不再点导航栏的
+  签到图标。原因见下。
+
+### 为什么签到不点那个图标
+
+导航栏的签到入口是个纯 JS 绑定的 `<span title="签到">`，没有 href：
+
+- 它位于 sticky 头部 `#nsk-head` 内，原生点击会被头部自身接走，报
+  `element click intercepted`；
+- 改用 JS 点击虽然能生效，但页面既不跳转也不弹窗，**成败完全不可观测**，
+  脚本只能瞎猜。实测中出现过「签到其实成功了，日志却报失败」的情况。
+
+而 `/api/attendance` 会明确返回结果，是唯一可靠的判定依据：
+
+```jsonc
+// 成功
+{"success": true,  "message": "签到收益 5 个鸡腿", "gain": 5, "current": 1005}
+// 今天已签过（注意 HTTP 状态是 500，但 body 有效，不能看状态码）
+{"success": false, "message": "今天已完成签到，请勿重复操作"}
+```
+
+请求是在**已经通过 Cloudflare 的页面上下文里**用 `fetch` 发出的，
+自动带上 cookie 和正确的 TLS 指纹，比在外部用 requests 直连可靠得多。
+
+## Cookie 维护
+
+NodeSeek 的登录态由 `session` / `pjwt` / `smac` 三个 Cookie 承载，
+**有效期 30 天，且服务端不做滑动续期** —— 实测每次运行后浏览器都拿不到
+新的 `Set-Cookie`，所以到期只能重新登录换一份，没法自动续。
+
+脚本每次运行都会从 `pjwt`（JWT，payload 里的 `ts` 是签发时间）推算到期日：
+剩余不足 7 天会在 Actions 摘要里挂 `warning`，已过期则报 `error`。
+
+更新时不用手工拼接，用附带的脚本：
+
+```bash
+# 从浏览器扩展（EditThisCookie / Cookie-Editor）导出 JSON 后
+python3 scripts/update_cookie.py cookies.json
+
+# 或直接粘贴 DevTools 里的 Cookie 请求头
+python3 scripts/update_cookie.py --raw "session=xxx; pjwt=yyy; smac=zzz"
+```
+
+它会校验必需的 Cookie 是否齐全、算出新的到期日，再写入 Secret。
+
+## 排查
+
+手动触发时可以勾选 `debug`，运行会把每一步的截图和页面源码传到
+artifact（保留 7 天）。runner 上已装 `fonts-noto-cjk`，截图里的中文
+不会变成方块。
 
 ## 注意事项
 
