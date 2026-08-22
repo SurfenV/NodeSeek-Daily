@@ -128,8 +128,10 @@ jobs:
           DAYS: ${{ steps.run.outputs.cookie_days }}
           EXPIRY: ${{ steps.run.outputs.cookie_expiry }}
           EXPIRING: ${{ steps.run.outputs.cookie_expiring }}
+        # 提醒失败不能拖垮主流程：签到成功就该是成功。
+        continue-on-error: true
         run: |
-          set -euo pipefail
+          set -uo pipefail
           TITLE="NS_COOKIE 即将过期，请更新"
           EXISTING="$(gh issue list -R "$REPO" --state open \
             --search "in:title $TITLE" --json number -q '.[0].number // empty')"
