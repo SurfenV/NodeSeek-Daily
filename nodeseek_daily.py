@@ -6,6 +6,7 @@ See LICENSE file in the project root for full license information.
 """
 import os
 import json
+import base64
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -332,38 +333,60 @@ def click_chicken_leg(driver):
         print(f"加鸡腿操作失败: {str(e)}")
         return False
 
-def report_cookie_status(driver):
-    """检查关键 Cookie 的剩余有效期，快过期时用 ::warning:: 在 Actions 摘要里告警。
+# NodeSeek 的登录态有效期为 30 天，且服务端不做滑动续期——每次运行后
+# 浏览器都拿不到新的 Set-Cookie，所以到期只能重新登录换 Cookie。
+SESSION_TTL_DAYS = 30
 
-    NodeSeek 的登录态由 session/pjwt/smac 三个 Cookie 承载，有效期 30 天。
-    过期后签到会静默失败，所以提前预警比事后排查划算。
+
+def report_cookie_status(driver):
+    """算出登录态还能撑多久，临近过期时在 Actions 摘要里告警。
+
+    优先用浏览器里的 expiry（万一哪天服务端开始续期，这里能自动跟上）；
+    读不到就退回解析 pjwt —— 它是 JWT，payload 里的 ts 是签发时间戳。
     """
     KEYS = ("session", "pjwt", "smac")
     now = time.time()
-    found = {}
+
+    expiry = None
+    source = ""
     try:
-        for c in driver.get_cookies():
-            if c["name"] in KEYS and c.get("expiry"):
-                found[c["name"]] = c["expiry"]
-    except Exception as e:
-        print(f"读取 Cookie 状态失败: {str(e)}")
+        found = {c["name"]: c["expiry"] for c in driver.get_cookies()
+                 if c["name"] in KEYS and c.get("expiry")}
+        if found:
+            expiry, source = min(found.values()), "浏览器 Cookie"
+    except Exception:
+        pass
+
+    if expiry is None:
+        for item in (cookie or "").split(";"):
+            item = item.strip()
+            if not item.startswith("pjwt="):
+                continue
+            try:
+                payload = item[len("pjwt="):].split(".")[0]
+                payload += "=" * (-len(payload) % 4)
+                issued = json.loads(base64.urlsafe_b64decode(payload)).get("ts")
+                if issued:
+                    expiry = issued + SESSION_TTL_DAYS * 86400
+                    source = "pjwt 签发时间推算"
+            except Exception as e:
+                print(f"解析 pjwt 失败: {str(e)}")
+            break
+
+    if expiry is None:
+        print("无法判断 Cookie 有效期")
         return
 
-    if not found:
-        print("未读取到关键 Cookie 的过期时间")
-        return
+    days = (expiry - now) / 86400
+    stamp = time.strftime("%Y-%m-%d", time.gmtime(expiry))
+    print(f"登录态过期时间: {stamp} UTC（{days:.1f} 天后，依据：{source}）")
 
-    print("Cookie 剩余有效期:")
-    for name in KEYS:
-        if name in found:
-            print(f"   {name}: {(found[name] - now) / 86400:.1f} 天")
-
-    days = (min(found.values()) - now) / 86400
-    if days > 25:
-        print(f"服务端已滑动续期，Cookie 有效期刷新到 {days:.1f} 天")
+    if days < 0:
+        print("::error::NS_COOKIE 已过期，请重新登录 NodeSeek 并更新 Secret")
     elif days < 7:
-        print(f"::warning::NS_COOKIE 将在 {days:.1f} 天后过期，"
-              f"请重新登录 NodeSeek 并更新 Secret，否则签到会开始失败")
+        print(f"::warning::NS_COOKIE 还有 {days:.1f} 天过期（{stamp}）。"
+              f"请重新登录 NodeSeek，导出 Cookie 后更新仓库 Secret NS_COOKIE，"
+              f"否则签到将开始失败")
 
 
 def save_debug_artifacts(driver, tag):
