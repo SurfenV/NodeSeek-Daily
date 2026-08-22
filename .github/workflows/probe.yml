@@ -20,13 +20,12 @@ jobs:
           sudo apt-get install -y xvfb fonts-noto-cjk
           python -m pip install --upgrade pip setuptools
           pip install -r requirements.txt
-      - name: 探测签到入口
+      - name: 探测签到 API
         env:
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
         run: |
           cat > probe.py <<'PY'
-          import os, time, undetected_chromedriver as uc
-          from selenium.webdriver.common.by import By
+          import os, time, json, undetected_chromedriver as uc
           uc.Chrome.__del__ = lambda self: None
           o = uc.ChromeOptions()
           for a in ('--no-sandbox','--disable-dev-shm-usage','--window-size=1920,1080'):
@@ -42,25 +41,24 @@ jobs:
                   d.add_cookie({'name':n,'value':v,'domain':'.nodeseek.com','path':'/'})
               except Exception: pass
           d.refresh(); time.sleep(6)
-          print("== 首页 URL:", d.current_url)
 
-          icon = d.find_element(By.XPATH, "//span[@title='签到']")
-          print("== 找到签到图标，JS 点击（不做 scrollIntoView）")
-          d.execute_script("arguments[0].click();", icon)
-          time.sleep(8)
-
-          print("== 点击后 URL:", d.current_url)
-          d.save_screenshot("probe-after-click.png")
-          open("probe-after-click.html","w",encoding="utf-8").write(d.page_source)
-
-          print("== 页面上所有 button:")
-          for b in d.find_elements(By.TAG_NAME,"button"):
-              t=(b.text or "").strip()
-              if t: print(f"   [{t}] displayed={b.is_displayed()} class={b.get_attribute('class')}")
-          print("== 含「鸡腿」或「手气」的元素:")
-          for el in d.find_elements(By.XPATH,"//*[contains(text(),'鸡腿') or contains(text(),'手气') or contains(text(),'签到')]"):
-              t=(el.text or "").strip()[:60]
-              if t: print(f"   <{el.tag_name}> {t!r} displayed={el.is_displayed()}")
+          # 在已通过 Cloudflare 的页面上下文里发请求，自动带 cookie 和正确的 TLS 指纹
+          js = """
+          const cb = arguments[arguments.length - 1];
+          fetch(arguments[0], {method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include'})
+            .then(r => r.text().then(t => cb(JSON.stringify({status:r.status, body:t.slice(0,600)}))))
+            .catch(e => cb(JSON.stringify({error:String(e)})));
+          """
+          d.set_script_timeout(40)
+          for path in ["/api/attendance?random=false",
+                       "/api/attendance?random=true",
+                       "/api/statistics/user-info"]:
+              try:
+                  r = json.loads(d.execute_async_script(js, path))
+                  print(f"POST {path}\n   -> {r}\n")
+              except Exception as e:
+                  print(f"POST {path}\n   -> 异常 {e}\n")
+              time.sleep(2)
           try: d.quit()
           except Exception: pass
           PY
