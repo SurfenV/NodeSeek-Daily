@@ -63,6 +63,94 @@ fetch(arguments[0], {
 """
 
 
+SESSION_TTL_DAYS = 30
+
+# 签到返回值：区分「这次没成功，可以重试」和「凭证废了，重试也没用」
+CREDENTIAL_INVALID = "credential_invalid"
+
+# 一次运行的结果汇总，跑完后组装成一条 Bark 通知
+summary = {
+    "sign": None,          # True / False / CREDENTIAL_INVALID
+    "sign_message": "",
+    "gain": None,
+    "current": None,
+    "comment_done": 0,
+    "comment_target": 0,
+    "chicken": False,
+    "cookie_days": None,
+}
+
+
+def bark_notify(title, body, url=None):
+    """推送到 Bark。失败只记日志，绝不影响签到主流程。"""
+    key = os.environ.get("BARK_KEY", "").strip()
+    if not key:
+        print("未配置 BARK_KEY，跳过推送")
+        return
+
+    server = os.environ.get("BARK_SERVER", "https://api.day.app").strip().rstrip("/")
+    payload = {
+        "title": title,
+        "body": body,
+        "group": os.environ.get("BARK_GROUP", "NodeSeek").strip() or "NodeSeek",
+    }
+    if url:
+        payload["url"] = url
+
+    # 用 POST + JSON，避免正文里的换行和斜杠被 URL 路径截断
+    req = urllib.request.Request(
+        f"{server}/{key}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            ok = json.loads(r.read().decode("utf-8", "replace")).get("code") == 200
+        print("Bark 推送成功" if ok else "Bark 推送返回异常")
+    except Exception as e:
+        print(f"Bark 推送失败: {type(e).__name__}: {str(e)}")
+
+
+def send_summary_notification():
+    """把本次运行的结果组装成一条通知。"""
+    sign = summary["sign"]
+    if sign is True:
+        title = "✅ NodeSeek 签到成功"
+    elif sign is CREDENTIAL_INVALID:
+        title = "🔑 NodeSeek Cookie 已失效"
+    else:
+        title = "❌ NodeSeek 签到失败"
+
+    lines = [summary["sign_message"] or "(无返回信息)"]
+
+    if sign is True and summary["current"] is not None:
+        gain = summary["gain"]
+        lines[0] = (f"签到 +{gain}，当前 {summary['current']} 个鸡腿"
+                    if gain is not None else f"当前 {summary['current']} 个鸡腿")
+
+    if summary["comment_target"]:
+        mark = "✓" if summary["chicken"] else "✗"
+        lines.append(f"评论 {summary['comment_done']}/{summary['comment_target']} · 加鸡腿 {mark}")
+
+    if sign is CREDENTIAL_INVALID:
+        lines.append("需重新登录 NodeSeek 并更新 Secret NS_COOKIE")
+    elif summary["cookie_days"] is not None:
+        days = summary["cookie_days"]
+        lines.append(f"Cookie 剩 {days:.0f} 天"
+                     + ("（请尽快更新）" if days < 7 else ""))
+
+    # 点通知直接跳到本次运行的日志页
+    url = None
+    server = os.environ.get("GITHUB_SERVER_URL")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if server and repo and run_id:
+        url = f"{server}/{repo}/actions/runs/{run_id}"
+
+    bark_notify(title, "\n".join(lines), url)
+
+
 def click_sign_icon(driver):
     """
     执行每日签到。返回 True 表示今日签到已落实（含「今天已经签过」）。
@@ -365,94 +453,6 @@ def click_chicken_leg(driver):
 
 # NodeSeek 的登录态有效期为 30 天，且服务端不做滑动续期——每次运行后
 # 浏览器都拿不到新的 Set-Cookie，所以到期只能重新登录换 Cookie。
-SESSION_TTL_DAYS = 30
-
-# 签到返回值：区分「这次没成功，可以重试」和「凭证废了，重试也没用」
-CREDENTIAL_INVALID = "credential_invalid"
-
-# 一次运行的结果汇总，跑完后组装成一条 Bark 通知
-summary = {
-    "sign": None,          # True / False / CREDENTIAL_INVALID
-    "sign_message": "",
-    "gain": None,
-    "current": None,
-    "comment_done": 0,
-    "comment_target": 0,
-    "chicken": False,
-    "cookie_days": None,
-}
-
-
-def bark_notify(title, body, url=None):
-    """推送到 Bark。失败只记日志，绝不影响签到主流程。"""
-    key = os.environ.get("BARK_KEY", "").strip()
-    if not key:
-        print("未配置 BARK_KEY，跳过推送")
-        return
-
-    server = os.environ.get("BARK_SERVER", "https://api.day.app").strip().rstrip("/")
-    payload = {
-        "title": title,
-        "body": body,
-        "group": os.environ.get("BARK_GROUP", "NodeSeek").strip() or "NodeSeek",
-    }
-    if url:
-        payload["url"] = url
-
-    # 用 POST + JSON，避免正文里的换行和斜杠被 URL 路径截断
-    req = urllib.request.Request(
-        f"{server}/{key}",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            ok = json.loads(r.read().decode("utf-8", "replace")).get("code") == 200
-        print("Bark 推送成功" if ok else "Bark 推送返回异常")
-    except Exception as e:
-        print(f"Bark 推送失败: {type(e).__name__}: {str(e)}")
-
-
-def send_summary_notification():
-    """把本次运行的结果组装成一条通知。"""
-    sign = summary["sign"]
-    if sign is True:
-        title = "✅ NodeSeek 签到成功"
-    elif sign is CREDENTIAL_INVALID:
-        title = "🔑 NodeSeek Cookie 已失效"
-    else:
-        title = "❌ NodeSeek 签到失败"
-
-    lines = [summary["sign_message"] or "(无返回信息)"]
-
-    if sign is True and summary["current"] is not None:
-        gain = summary["gain"]
-        lines[0] = (f"签到 +{gain}，当前 {summary['current']} 个鸡腿"
-                    if gain is not None else f"当前 {summary['current']} 个鸡腿")
-
-    if summary["comment_target"]:
-        mark = "✓" if summary["chicken"] else "✗"
-        lines.append(f"评论 {summary['comment_done']}/{summary['comment_target']} · 加鸡腿 {mark}")
-
-    if sign is CREDENTIAL_INVALID:
-        lines.append("需重新登录 NodeSeek 并更新 Secret NS_COOKIE")
-    elif summary["cookie_days"] is not None:
-        days = summary["cookie_days"]
-        lines.append(f"Cookie 剩 {days:.0f} 天"
-                     + ("（请尽快更新）" if days < 7 else ""))
-
-    # 点通知直接跳到本次运行的日志页
-    url = None
-    server = os.environ.get("GITHUB_SERVER_URL")
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    run_id = os.environ.get("GITHUB_RUN_ID")
-    if server and repo and run_id:
-        url = f"{server}/{repo}/actions/runs/{run_id}"
-
-    bark_notify(title, "\n".join(lines), url)
-
-
 def report_cookie_status(driver):
     """算出登录态还能撑多久，临近过期时在 Actions 摘要里告警。
 

@@ -103,6 +103,22 @@ python3 scripts/update_cookie.py --raw "session=xxx; pjwt=yyy; smac=zzz"
 
 它会校验必需的 Cookie 是否齐全、算出新的到期日，再写入 Secret。
 
+## Bark 通知
+
+每次运行结束都会推送一条通知，汇总签到结果、评论数、加鸡腿状态和 Cookie
+剩余天数，点通知直接跳到本次运行的日志页。
+
+| 变量 | 类型 | 说明 |
+| --- | --- | --- |
+| `BARK_KEY` | Secret | Bark App 里那条 URL `https://api.day.app/<KEY>/...` 中的 KEY |
+| `BARK_GROUP` | Variable | 通知分组，默认 `NodeSeek` |
+| `BARK_SERVER` | Variable | 自建服务器地址，默认 `https://api.day.app` |
+
+不配 `BARK_KEY` 就跳过推送，不影响签到。推送失败也只记日志，不会让运行失败。
+
+推送时机做过收敛：**成功**和 **Cookie 失效**立即推送；普通失败只在最后一次
+重试后才推——否则一次失败会连发 3 条。
+
 ## 排查
 
 手动触发时可以勾选 `debug`，运行会把每一步的截图和页面源码传到
