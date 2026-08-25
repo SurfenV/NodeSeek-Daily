@@ -7,6 +7,7 @@ See LICENSE file in the project root for full license information.
 import os
 import json
 import base64
+import urllib.request
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -103,10 +104,12 @@ def click_sign_icon(driver):
         current = data.get("current")
         print(f"✅ 签到成功: {message}"
               + (f"（+{gain}，当前 {current}）" if gain is not None else ""))
+        summary.update(sign=True, sign_message=message, gain=gain, current=current)
         return True
 
     if any(k in message for k in ("今天已完成签到", "已完成签到", "已签到", "请勿重复")):
         print(f"✅ 今日已签到，无需重复: {message}")
+        summary.update(sign=True, sign_message=message)
         return True
 
     print(f"❌ 签到失败（HTTP {resp.get('status')}）: {message or body[:300]}")
@@ -118,7 +121,10 @@ def click_sign_icon(driver):
             or any(k in message for k in ("未登录", "请先登录", "登录已失效")):
         print("!! Cookie 已失效（可能是退出登录、改过密码，或已超过 30 天有效期）")
         print("!! 请重新登录 NodeSeek 并更新 Secret NS_COOKIE，重试无意义")
+        summary.update(sign=CREDENTIAL_INVALID, sign_message=message or "USER NOT FOUND")
         return CREDENTIAL_INVALID
+
+    summary.update(sign=False, sign_message=message or body[:200])
     return False
 
 
@@ -229,23 +235,31 @@ def nodeseek_comment(driver):
         
         is_chicken_leg = False
         done = 0
+        summary["comment_target"] = len(selected_urls)
 
         # 使用URL列表进行操作
         for i, post_url in enumerate(selected_urls):
+            # 记录当前进行到哪一步。Selenium 的 TimeoutException 消息是空的，
+            # 不标注的话日志里只有一句「处理帖子时出错: Message:」，无从排查。
+            stage = "打开帖子"
             try:
-                print(f"正在处理第 {i+1} 个帖子")
+                print(f"正在处理第 {i+1} 个帖子: {post_url}")
                 driver.get(post_url)
-                
+
                 # 处理加鸡腿
                 if is_chicken_leg is False:
                     is_chicken_leg = click_chicken_leg(driver)
-                
-                # 等待 CodeMirror 编辑器加载
-                editor = WebDriverWait(driver, 30).until(
+                    summary["chicken"] = summary["chicken"] or is_chicken_leg
+
+                # 等待 CodeMirror 编辑器加载。20 秒还没出来基本就是这个帖子
+                # 不让评论了，继续等只是白白拖长运行时间。
+                stage = "等待评论编辑器"
+                editor = WebDriverWait(driver, 20).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, '.CodeMirror'))
                 )
-                
+
                 # 点击编辑器区域获取焦点
+                stage = "聚焦编辑器"
                 editor.click()
                 time.sleep(0.5)
                 input_text = random.choice(randomInputStr)
@@ -253,6 +267,7 @@ def nodeseek_comment(driver):
                 # 模拟输入
                 actions = ActionChains(driver)
                 # 随机输入 randomInputStr
+                stage = "输入评论内容"
                 for char in input_text:
                     actions.send_keys(char)
                     actions.pause(random.uniform(0.1, 0.3))
@@ -262,13 +277,15 @@ def nodeseek_comment(driver):
                 time.sleep(2)
                 
                 # 使用更精确的选择器定位提交按钮
-                submit_button = WebDriverWait(driver, 30).until(
+                stage = "等待发布按钮"
+                submit_button = WebDriverWait(driver, 20).until(
                  EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'submit') and contains(@class, 'btn') and contains(text(), '发布评论')]"))
                 )
                 # 确保按钮可见并可点击
                 # 必须用 block:'center'。scrollIntoView(true) 会把元素对齐到
                 # 视口顶端，而 NodeSeek 的 #nsk-head 是 sticky 头部，会把按钮盖住，
                 # 导致 element click intercepted。
+                stage = "点击发布"
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
                 time.sleep(0.5)
                 try:
@@ -285,9 +302,15 @@ def nodeseek_comment(driver):
                 time.sleep(random.uniform(2,5))
                 
             except Exception as e:
-                print(f"处理帖子时出错: {str(e)}")
+                # TimeoutException 的 str() 往往是空的，只能靠 stage 和类型名定位
+                detail = (str(e).strip().splitlines() or [""])[0]
+                print(f"处理帖子失败 [{stage}] {post_url}")
+                print(f"   {type(e).__name__}: {detail or '(无错误信息，通常是等待超时)'}")
+                if stage == "等待评论编辑器":
+                    print("   该帖大概率不接受评论（已关闭回复或需要更高权限），跳过")
                 continue
                 
+        summary["comment_done"] = done
         print(f"NodeSeek评论任务完成，成功 {done} 个")
         return done
 
@@ -347,6 +370,88 @@ SESSION_TTL_DAYS = 30
 # 签到返回值：区分「这次没成功，可以重试」和「凭证废了，重试也没用」
 CREDENTIAL_INVALID = "credential_invalid"
 
+# 一次运行的结果汇总，跑完后组装成一条 Bark 通知
+summary = {
+    "sign": None,          # True / False / CREDENTIAL_INVALID
+    "sign_message": "",
+    "gain": None,
+    "current": None,
+    "comment_done": 0,
+    "comment_target": 0,
+    "chicken": False,
+    "cookie_days": None,
+}
+
+
+def bark_notify(title, body, url=None):
+    """推送到 Bark。失败只记日志，绝不影响签到主流程。"""
+    key = os.environ.get("BARK_KEY", "").strip()
+    if not key:
+        print("未配置 BARK_KEY，跳过推送")
+        return
+
+    server = os.environ.get("BARK_SERVER", "https://api.day.app").strip().rstrip("/")
+    payload = {
+        "title": title,
+        "body": body,
+        "group": os.environ.get("BARK_GROUP", "NodeSeek").strip() or "NodeSeek",
+    }
+    if url:
+        payload["url"] = url
+
+    # 用 POST + JSON，避免正文里的换行和斜杠被 URL 路径截断
+    req = urllib.request.Request(
+        f"{server}/{key}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            ok = json.loads(r.read().decode("utf-8", "replace")).get("code") == 200
+        print("Bark 推送成功" if ok else "Bark 推送返回异常")
+    except Exception as e:
+        print(f"Bark 推送失败: {type(e).__name__}: {str(e)}")
+
+
+def send_summary_notification():
+    """把本次运行的结果组装成一条通知。"""
+    sign = summary["sign"]
+    if sign is True:
+        title = "✅ NodeSeek 签到成功"
+    elif sign is CREDENTIAL_INVALID:
+        title = "🔑 NodeSeek Cookie 已失效"
+    else:
+        title = "❌ NodeSeek 签到失败"
+
+    lines = [summary["sign_message"] or "(无返回信息)"]
+
+    if sign is True and summary["current"] is not None:
+        gain = summary["gain"]
+        lines[0] = (f"签到 +{gain}，当前 {summary['current']} 个鸡腿"
+                    if gain is not None else f"当前 {summary['current']} 个鸡腿")
+
+    if summary["comment_target"]:
+        mark = "✓" if summary["chicken"] else "✗"
+        lines.append(f"评论 {summary['comment_done']}/{summary['comment_target']} · 加鸡腿 {mark}")
+
+    if sign is CREDENTIAL_INVALID:
+        lines.append("需重新登录 NodeSeek 并更新 Secret NS_COOKIE")
+    elif summary["cookie_days"] is not None:
+        days = summary["cookie_days"]
+        lines.append(f"Cookie 剩 {days:.0f} 天"
+                     + ("（请尽快更新）" if days < 7 else ""))
+
+    # 点通知直接跳到本次运行的日志页
+    url = None
+    server = os.environ.get("GITHUB_SERVER_URL")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if server and repo and run_id:
+        url = f"{server}/{repo}/actions/runs/{run_id}"
+
+    bark_notify(title, "\n".join(lines), url)
+
 
 def report_cookie_status(driver):
     """算出登录态还能撑多久，临近过期时在 Actions 摘要里告警。
@@ -389,6 +494,7 @@ def report_cookie_status(driver):
 
     days = (expiry - now) / 86400
     stamp = time.strftime("%Y-%m-%d", time.gmtime(expiry))
+    summary["cookie_days"] = days
     print(f"登录态过期时间: {stamp} UTC（{days:.1f} 天后，依据：{source}）")
 
     if days < 0:
@@ -447,6 +553,13 @@ if __name__ == "__main__":
             driver.quit()
         except Exception:
             pass
+
+    # 通知策略：成功、以及凭证失效（不会再重试）都立即推送；普通失败只在
+    # CI 的最后一次尝试才推，否则重试 3 次会连发 3 条。
+    if signed is True or signed is CREDENTIAL_INVALID or env_bool("NS_NOTIFY_FAILURE"):
+        send_summary_notification()
+    else:
+        print("本次失败还会重试，暂不推送通知")
 
     print("脚本执行完成")
     if signed is CREDENTIAL_INVALID:

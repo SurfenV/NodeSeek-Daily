@@ -88,6 +88,8 @@ jobs:
           # NodeSeek 前面的 Cloudflare 挡下，这是原配置最大的不稳定来源。
           HEADLESS: ${{ github.event.inputs.headless || 'false' }}
           NS_DEBUG: ${{ github.event.inputs.debug || 'false' }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_GROUP: ${{ vars.BARK_GROUP || 'NodeSeek' }}
         run: |
           set -uo pipefail
           if [ -z "${NS_COOKIE}" ]; then
@@ -97,6 +99,10 @@ jobs:
 
           for attempt in 1 2 3; do
             echo "::group::第 ${attempt} 次尝试"
+            # 最后一次尝试才允许推送失败通知，否则重试会连发 3 条
+            if [ $attempt -eq 3 ]; then
+              export NS_NOTIFY_FAILURE=1
+            fi
             xvfb-run -a --server-args="-screen 0 1920x1080x24" \
               python nodeseek_daily.py
             code=$?
