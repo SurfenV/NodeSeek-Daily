@@ -45,6 +45,14 @@ headless = env_bool("HEADLESS", "true")
 # 设为 0 可完全关闭评论，只保留签到与加鸡腿。
 comment_count = env_int("NS_COMMENT_COUNT", 3)
 
+# 分批评论：每 NS_COMMENT_BATCH 个之后停 NS_COMMENT_INTERVAL 秒。
+# 连续快速刷评论既容易触发站点风控，也更容易被人看出是机器人。
+comment_batch = env_int("NS_COMMENT_BATCH", 3) or 3
+comment_interval = env_int("NS_COMMENT_INTERVAL", 300)
+
+# 每天可免费投喂（加鸡腿）的次数，站点当前额度是 2
+chicken_count = env_int("NS_CHICKEN_COUNT", 2)
+
 # 打开后每一步都会保存截图和页面源码，用于排查选择器失效
 debug_mode = env_bool("NS_DEBUG")
 
@@ -77,6 +85,7 @@ summary = {
     "comment_done": 0,
     "comment_target": 0,
     "chicken": False,
+    "chicken_done": 0,
     "cookie_days": None,
 }
 
@@ -130,8 +139,8 @@ def send_summary_notification():
                     if gain is not None else f"当前 {summary['current']} 个鸡腿")
 
     if summary["comment_target"]:
-        mark = "✓" if summary["chicken"] else "✗"
-        lines.append(f"评论 {summary['comment_done']}/{summary['comment_target']} · 加鸡腿 {mark}")
+        lines.append(f"评论 {summary['comment_done']}/{summary['comment_target']}"
+                     f" · 投喂 {summary['chicken_done']}/{chicken_count}")
 
     if sign is CREDENTIAL_INVALID:
         lines.append("需重新登录 NodeSeek 并更新 Secret NS_COOKIE")
@@ -295,118 +304,192 @@ def setup_driver_and_cookies():
         print(traceback.format_exc())
         return None
 
-def nodeseek_comment(driver):
+def collect_candidate_posts(driver, need):
+    """收集可能可以评论的帖子链接。
+
+    实测交易区第一页约 49 个非置顶帖，但其中相当一部分评论不了（老帖、
+    已关闭回复、需要更高权限）。所以候选要按目标数的数倍来备，不够就翻页，
+    否则凑不满想要的评论数。
+    """
+    urls = []
+    seen = set()
+    page = 1
+
+    while len(urls) < need and page <= 5:
+        url = 'https://www.nodeseek.com/categories/trade'
+        if page > 1:
+            url += f'?page={page}'
+        print(f"正在读取交易区第 {page} 页...")
+        driver.get(url)
+
+        try:
+            posts = WebDriverWait(driver, 20).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, '.post-list-item'))
+            )
+        except Exception:
+            print(f"第 {page} 页没读到帖子列表，停止翻页")
+            break
+
+        added = 0
+        for post in posts:
+            # 跳过置顶帖
+            if post.find_elements(By.CSS_SELECTOR, '.pined'):
+                continue
+            try:
+                link = post.find_element(By.CSS_SELECTOR, '.post-title a').get_attribute('href')
+            except Exception:
+                continue
+            if link and link not in seen:
+                seen.add(link)
+                urls.append(link)
+                added += 1
+
+        print(f"   第 {page} 页新增 {added} 个候选，累计 {len(urls)} 个")
+        if added == 0:
+            break
+        page += 1
+
+    # 打乱顺序，避免每天都从同几个最新帖子开始
+    random.shuffle(urls)
+    return urls
+
+
+def comment_one_post(driver, post_url):
+    """在单个帖子下发一条评论。成功返回 True，不可评论或出错返回 False。"""
+    # 记录当前进行到哪一步。Selenium 的 TimeoutException 消息是空的，
+    # 不标注的话日志里只有一句「处理帖子时出错: Message:」，无从排查。
+    stage = "打开帖子"
     try:
-        print("正在访问交易区...")
-        target_url = 'https://www.nodeseek.com/categories/trade'
-        driver.get(target_url)
-        print("等待页面加载...")
-        
-        # 获取初始帖子列表
-        posts = WebDriverWait(driver, 30).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, '.post-list-item'))
+        driver.get(post_url)
+
+        # 等待 CodeMirror 编辑器加载。20 秒还没出来基本就是这个帖子
+        # 不让评论了，继续等只是白白拖长运行时间。
+        stage = "等待评论编辑器"
+        editor = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, '.CodeMirror'))
         )
-        print(f"成功获取到 {len(posts)} 个帖子")
-        
-        # 过滤掉置顶帖
-        valid_posts = [post for post in posts if not post.find_elements(By.CSS_SELECTOR, '.pined')]
-        selected_posts = random.sample(valid_posts, min(comment_count, len(valid_posts)))
-        
-        # 存储已选择的帖子URL
-        selected_urls = []
-        for post in selected_posts:
-            try:
-                post_link = post.find_element(By.CSS_SELECTOR, '.post-title a')
-                selected_urls.append(post_link.get_attribute('href'))
-            except:
-                continue
-        
-        is_chicken_leg = False
+
+        # 点击编辑器区域获取焦点。编辑器有时会被外层的
+        # #code-mirror-editor 盖住，原生点击会被拦，退回 JS 点击。
+        stage = "聚焦编辑器"
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", editor)
+        time.sleep(0.3)
+        try:
+            editor.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", editor)
+        time.sleep(0.5)
+
+        input_text = random.choice(randomInputStr)
+
+        # 模拟输入
+        stage = "输入评论内容"
+        actions = ActionChains(driver)
+        for char in input_text:
+            actions.send_keys(char)
+            actions.pause(random.uniform(0.1, 0.3))
+        actions.perform()
+
+        # 等待一下确保内容已经输入
+        time.sleep(2)
+
+        # 使用更精确的选择器定位提交按钮
+        stage = "等待发布按钮"
+        submit_button = WebDriverWait(driver, 20).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'submit') and contains(@class, 'btn') and contains(text(), '发布评论')]"))
+        )
+
+        # 必须用 block:'center'。scrollIntoView(true) 会把元素对齐到
+        # 视口顶端，而 NodeSeek 的 #nsk-head 是 sticky 头部，会把按钮盖住，
+        # 导致 element click intercepted。
+        stage = "点击发布"
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
+        time.sleep(0.5)
+        try:
+            submit_button.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", submit_button)
+
+        time.sleep(random.uniform(2, 4))
+        print(f"   ✅ 已评论: {post_url}")
+        return True
+
+    except Exception as e:
+        # TimeoutException 的 str() 往往是空的，只能靠 stage 和类型名定位
+        detail = (str(e).strip().splitlines() or [""])[0]
+        print(f"   ✗ 跳过 [{stage}] {post_url}")
+        print(f"     {type(e).__name__}: {detail or '(无错误信息，通常是等待超时)'}")
+        if stage == "等待评论编辑器":
+            print("     该帖大概率不接受评论（已关闭回复或需要更高权限）")
+        return False
+
+
+def nodeseek_comment(driver):
+    """评论若干帖子并顺带投喂鸡腿。
+
+    分批进行：每完成 comment_batch 条就停 comment_interval 秒。连续快速刷
+    评论既容易触发站点风控，也更容易被人一眼看出是机器人。
+    """
+    target = comment_count
+    summary["comment_target"] = target
+    if target <= 0:
+        return 0
+
+    try:
+        # 按目标的 3 倍备候选，覆盖掉那些评论不了的帖子
+        urls = collect_candidate_posts(driver, max(target * 3, 20))
+        if not urls:
+            print("没有拿到任何候选帖子")
+            return 0
+        print(f"共 {len(urls)} 个候选帖子，目标评论 {target} 条，"
+              f"每 {comment_batch} 条休息 {comment_interval} 秒")
+
         done = 0
-        summary["comment_target"] = len(selected_urls)
+        chicken_done = 0
+        chicken_tries = 0
+        last_pause_at = 0
 
-        # 使用URL列表进行操作
-        for i, post_url in enumerate(selected_urls):
-            # 记录当前进行到哪一步。Selenium 的 TimeoutException 消息是空的，
-            # 不标注的话日志里只有一句「处理帖子时出错: Message:」，无从排查。
-            stage = "打开帖子"
-            try:
-                print(f"正在处理第 {i+1} 个帖子: {post_url}")
-                driver.get(post_url)
+        for post_url in urls:
+            if done >= target:
+                break
 
-                # 处理加鸡腿
-                if is_chicken_leg is False:
-                    is_chicken_leg = click_chicken_leg(driver)
-                    summary["chicken"] = summary["chicken"] or is_chicken_leg
+            # 每满一批就歇一会儿。按成功数分批，失败跳过的不计入。
+            if done > 0 and done % comment_batch == 0 and last_pause_at != done:
+                last_pause_at = done
+                remaining = target - done
+                print(f"── 已完成 {done}/{target} 条，休息 {comment_interval} 秒"
+                      f"（还剩 {remaining} 条）──")
+                time.sleep(comment_interval)
 
-                # 等待 CodeMirror 编辑器加载。20 秒还没出来基本就是这个帖子
-                # 不让评论了，继续等只是白白拖长运行时间。
-                stage = "等待评论编辑器"
-                editor = WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, '.CodeMirror'))
-                )
+            print(f"[{done + 1}/{target}] 尝试 {post_url}")
+            driver.get(post_url)
 
-                # 点击编辑器区域获取焦点
-                stage = "聚焦编辑器"
-                editor.click()
-                time.sleep(0.5)
-                input_text = random.choice(randomInputStr)
+            # 顺带投喂鸡腿。站点每天有免费额度（当前是 2 次），
+            # 原来只投一次，白白浪费剩下的额度。
+            if chicken_done < chicken_count and chicken_tries < chicken_count * 4:
+                chicken_tries += 1
+                if click_chicken_leg(driver):
+                    chicken_done += 1
+                    summary["chicken"] = True
+                    print(f"   已投喂 {chicken_done}/{chicken_count}")
 
-                # 模拟输入
-                actions = ActionChains(driver)
-                # 随机输入 randomInputStr
-                stage = "输入评论内容"
-                for char in input_text:
-                    actions.send_keys(char)
-                    actions.pause(random.uniform(0.1, 0.3))
-                actions.perform()
-                
-                # 等待一下确保内容已经输入
-                time.sleep(2)
-                
-                # 使用更精确的选择器定位提交按钮
-                stage = "等待发布按钮"
-                submit_button = WebDriverWait(driver, 20).until(
-                 EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'submit') and contains(@class, 'btn') and contains(text(), '发布评论')]"))
-                )
-                # 确保按钮可见并可点击
-                # 必须用 block:'center'。scrollIntoView(true) 会把元素对齐到
-                # 视口顶端，而 NodeSeek 的 #nsk-head 是 sticky 头部，会把按钮盖住，
-                # 导致 element click intercepted。
-                stage = "点击发布"
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_button)
-                time.sleep(0.5)
-                try:
-                    submit_button.click()
-                except Exception:
-                    driver.execute_script("arguments[0].click();", submit_button)
-                
+            if comment_one_post(driver, post_url):
                 done += 1
-                print(f"已在帖子 {post_url} 中完成评论")
-                
-                # 返回交易区
-                # driver.get(target_url)
-                # time.sleep(2)  # 等待页面加载
-                time.sleep(random.uniform(2,5))
-                
-            except Exception as e:
-                # TimeoutException 的 str() 往往是空的，只能靠 stage 和类型名定位
-                detail = (str(e).strip().splitlines() or [""])[0]
-                print(f"处理帖子失败 [{stage}] {post_url}")
-                print(f"   {type(e).__name__}: {detail or '(无错误信息，通常是等待超时)'}")
-                if stage == "等待评论编辑器":
-                    print("   该帖大概率不接受评论（已关闭回复或需要更高权限），跳过")
-                continue
-                
+
         summary["comment_done"] = done
-        print(f"NodeSeek评论任务完成，成功 {done} 个")
+        summary["chicken_done"] = chicken_done
+        print(f"NodeSeek评论任务完成，成功 {done}/{target} 条，投喂 {chicken_done}/{chicken_count} 次")
+        if done < target:
+            print(f"注意：候选帖子用完了，只完成 {done} 条。可以调大候选范围或降低目标")
         return done
 
     except Exception as e:
         print(f"NodeSeek评论出错: {str(e)}")
         print("详细错误信息:")
         print(traceback.format_exc())
+        summary["comment_done"] = summary.get("comment_done", 0)
         return 0
+
 
 def click_chicken_leg(driver):
     try:
@@ -542,7 +625,11 @@ if __name__ == "__main__":
         if signed is not True or debug_mode:
             save_debug_artifacts(driver, "sign")
 
-        if comment_count > 0:
+        # 只有签到成功才评论。签到失败会以非 0 退出触发 CI 重试，
+        # 若此处照常评论，重试一次就把评论重复发一轮。
+        if signed is not True:
+            print("签到未成功，跳过评论环节（避免重试时重复评论）")
+        elif comment_count > 0:
             nodeseek_comment(driver)
         else:
             print("NS_COMMENT_COUNT=0，跳过评论环节")
