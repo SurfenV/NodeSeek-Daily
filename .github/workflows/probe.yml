@@ -1,0 +1,93 @@
+name: 评论接口探测（临时）
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 准备环境
+        run: |
+          set -euo pipefail
+          echo "CHROME_MAIN_VERSION=$(google-chrome --version | grep -oE '[0-9]+' | head -1)" >> "$GITHUB_ENV"
+          sudo apt-get update && sudo apt-get install -y xvfb fonts-noto-cjk
+          python -m pip install --upgrade pip setuptools
+          pip install -r requirements.txt
+      - name: 捕获评论请求
+        env:
+          NS_COOKIE: ${{ secrets.NS_COOKIE }}
+        run: |
+          cat > probe.py <<'PY'
+          import os, time, json, random, undetected_chromedriver as uc
+          from selenium.webdriver.common.by import By
+          from selenium.webdriver.support.ui import WebDriverWait
+          from selenium.webdriver.support import expected_conditions as EC
+          from selenium.webdriver.common.action_chains import ActionChains
+          uc.Chrome.__del__ = lambda self: None
+          o = uc.ChromeOptions()
+          for a in ('--no-sandbox','--disable-dev-shm-usage','--window-size=1920,1080'):
+              o.add_argument(a)
+          kw={"options":o}
+          mv=os.environ.get("CHROME_MAIN_VERSION","").strip()
+          if mv.isdigit(): kw["version_main"]=int(mv)
+          d=uc.Chrome(**kw)
+          d.get("https://www.nodeseek.com"); time.sleep(5)
+          for it in os.environ["NS_COOKIE"].split(';'):
+              try:
+                  n,v=it.strip().split('=',1)
+                  d.add_cookie({'name':n,'value':v,'domain':'.nodeseek.com','path':'/'})
+              except Exception: pass
+          d.refresh(); time.sleep(5)
+
+          # 找一个交易区帖子
+          d.get("https://www.nodeseek.com/categories/trade"); time.sleep(4)
+          posts = d.find_elements(By.CSS_SELECTOR, '.post-list-item')
+          url = None
+          for p in posts:
+              if p.find_elements(By.CSS_SELECTOR, '.pined'): continue
+              try:
+                  url = p.find_element(By.CSS_SELECTOR, '.post-title a').get_attribute('href'); break
+              except Exception: pass
+          print("目标帖子:", url)
+          d.get(url); time.sleep(4)
+
+          # 拦截 fetch 与 XHR，记录评论提交时前端实际发的请求
+          d.execute_script("""
+          window.__reqs = [];
+          const of = window.fetch;
+          window.fetch = function(...a){
+            try{ window.__reqs.push({kind:'fetch', url:String(a[0]),
+                 method:(a[1]&&a[1].method)||'GET', body:(a[1]&&a[1].body)||null}); }catch(e){}
+            return of.apply(this,a);
+          };
+          const oo = XMLHttpRequest.prototype.open, os_ = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(m,u,...r){ this.__m=m; this.__u=u; return oo.call(this,m,u,...r); };
+          XMLHttpRequest.prototype.send = function(b){
+            try{ window.__reqs.push({kind:'xhr', url:String(this.__u), method:this.__m, body:b?String(b):null}); }catch(e){}
+            return os_.call(this,b);
+          };
+          """)
+
+          editor = WebDriverWait(d,20).until(EC.presence_of_element_located((By.CSS_SELECTOR,'.CodeMirror')))
+          editor.click(); time.sleep(0.5)
+          ActionChains(d).send_keys("帮顶").perform()
+          time.sleep(1.5)
+          btn = WebDriverWait(d,20).until(EC.element_to_be_clickable(
+              (By.XPATH,"//button[contains(@class,'submit') and contains(text(),'发布评论')]")))
+          d.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+          time.sleep(0.5); btn.click()
+          time.sleep(5)
+
+          reqs = d.execute_script("return window.__reqs || [];")
+          print("\n=== 捕获到的请求 ===")
+          for r in reqs:
+              if r.get("method","GET").upper() in ("POST","PUT"):
+                  print(json.dumps(r, ensure_ascii=False)[:500])
+          try: d.quit()
+          except Exception: pass
+          PY
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python probe.py
