@@ -52,11 +52,15 @@ jobs:
               try:
                   url = p.find_element(By.CSS_SELECTOR, '.post-title a').get_attribute('href'); break
               except Exception: pass
-          print("目标帖子:", url)
-          d.get(url); time.sleep(4)
+          # 收集候选，逐个尝试直到有一个真的能评论
+          urls=[]
+          for p in posts:
+              if p.find_elements(By.CSS_SELECTOR, '.pined'): continue
+              try: urls.append(p.find_element(By.CSS_SELECTOR,'.post-title a').get_attribute('href'))
+              except Exception: pass
+          print(f"候选帖子 {len(urls)} 个")
 
-          # 拦截 fetch 与 XHR，记录评论提交时前端实际发的请求
-          d.execute_script("""
+          INJECT = """
           window.__reqs = [];
           const of = window.fetch;
           window.fetch = function(...a){
@@ -70,20 +74,35 @@ jobs:
             try{ window.__reqs.push({kind:'xhr', url:String(this.__u), method:this.__m, body:b?String(b):null}); }catch(e){}
             return os_.call(this,b);
           };
-          """)
+          """
 
-          editor = WebDriverWait(d,20).until(EC.presence_of_element_located((By.CSS_SELECTOR,'.CodeMirror')))
-          editor.click(); time.sleep(0.5)
-          ActionChains(d).send_keys("帮顶").perform()
-          time.sleep(1.5)
-          btn = WebDriverWait(d,20).until(EC.element_to_be_clickable(
-              (By.XPATH,"//button[contains(@class,'submit') and contains(text(),'发布评论')]")))
-          d.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-          time.sleep(0.5); btn.click()
-          time.sleep(5)
+          reqs = []
+          for i, url in enumerate(urls[:8]):
+              print(f"\n[{i+1}] 尝试 {url}")
+              d.get(url); time.sleep(3)
+              d.execute_script(INJECT)
+              try:
+                  editor = WebDriverWait(d,8).until(
+                      EC.presence_of_element_located((By.CSS_SELECTOR,'.CodeMirror')))
+              except Exception:
+                  print("    无评论编辑器，跳过"); continue
+              editor.click(); time.sleep(0.5)
+              ActionChains(d).send_keys("帮顶").perform()
+              time.sleep(1.5)
+              try:
+                  btn = WebDriverWait(d,8).until(EC.element_to_be_clickable(
+                      (By.XPATH,"//button[contains(@class,'submit') and contains(text(),'发布评论')]")))
+              except Exception:
+                  print("    无发布按钮，跳过"); continue
+              d.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+              time.sleep(0.5); btn.click()
+              time.sleep(5)
+              reqs = d.execute_script("return window.__reqs || [];")
+              if any(r.get("method","GET").upper()=="POST" for r in reqs):
+                  print("    ✅ 评论已提交，捕获到请求"); break
+              print("    未捕获到 POST，继续")
 
-          reqs = d.execute_script("return window.__reqs || [];")
-          print("\n=== 捕获到的请求 ===")
+          print("\n=== 捕获到的 POST 请求 ===")
           for r in reqs:
               if r.get("method","GET").upper() in ("POST","PUT"):
                   print(json.dumps(r, ensure_ascii=False)[:500])
