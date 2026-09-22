@@ -629,11 +629,13 @@ if __name__ == "__main__":
         # 若此处照常评论，重试一次就把评论重复发一轮。
         if signed is not True:
             print("签到未成功，跳过评论环节（避免重试时重复评论）")
-        elif summary["gain"] is None and env_bool("NS_SKIP_COMMENT_IF_SIGNED"):
+        elif summary["gain"] is None and not env_bool("NS_FORCE_COMMENT"):
             # 接口返回「已完成签到」而不是本次签到收益，说明今天已经有一轮
-            # 任务跑过了。为了容忍 GitHub 定时任务的延迟与漏跑，同一天配了
-            # 多个 cron，这里据此避免把评论重复刷一遍。
-            print("今天已经签过（本轮任务此前已执行），跳过评论避免重复")
+            # 任务跑过了，评论多半也发满了。站点每天只有 20 条评论的鸡腿额度，
+            # 超出部分没有任何收益，纯粹是多刷垃圾评论，所以默认一律跳过。
+            # 确实需要补跑时才传 NS_FORCE_COMMENT=1。
+            print("今天已经签过（本轮任务此前已执行），跳过评论")
+            print("如确需补发评论，手动触发时把 force_comment 设为 true")
         elif comment_count > 0:
             nodeseek_comment(driver)
         else:

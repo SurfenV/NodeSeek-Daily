@@ -16,6 +16,10 @@ on:
         description: '本次评论多少个帖子（0 = 只签到，不评论）'
         required: false
         default: '20'
+      force_comment:
+        description: '今天已经跑过也强制再评论一轮（默认 false；超出每日 20 条额度的评论没有收益）'
+        required: false
+        default: 'false'
       comment_batch:
         description: '每批评论几条（留空用仓库变量，默认 3）'
         required: false
@@ -99,9 +103,10 @@ jobs:
           NS_COMMENT_BATCH: ${{ github.event.inputs.comment_batch || vars.NS_COMMENT_BATCH || '3' }}
           NS_COMMENT_INTERVAL: ${{ github.event.inputs.comment_interval || vars.NS_COMMENT_INTERVAL || '300' }}
           NS_CHICKEN_COUNT: ${{ vars.NS_CHICKEN_COUNT || '2' }}
-          # 仅定时触发时启用：今天已签过就不再评论，避免多个 cron 重复刷。
-          # 手动触发保持照常评论，方便补跑。
-          NS_SKIP_COMMENT_IF_SIGNED: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+          # 今天已经签过就不再评论——站点每天只有 20 条评论的鸡腿额度，
+          # 超出的没有收益，只是多刷垃圾评论。定时的多个 cron 和手动触发
+          # 都适用；确需补发时手动把 force_comment 设为 true。
+          NS_FORCE_COMMENT: ${{ github.event.inputs.force_comment || 'false' }}
           # 关键：跑在 Xvfb 上的「有头」Chrome。无头 Chrome 的指纹会被
           # NodeSeek 前面的 Cloudflare 挡下，这是原配置最大的不稳定来源。
           HEADLESS: ${{ github.event.inputs.headless || 'false' }}
